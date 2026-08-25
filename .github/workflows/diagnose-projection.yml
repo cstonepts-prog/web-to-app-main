@@ -1,0 +1,52 @@
+name: Code Dump Tool Projection Identity Diagnostic
+
+on:
+  push:
+    branches: [ codedump-v1.1.0-capacitor-build ]
+    paths:
+      - '.github/workflows/diagnose-projection.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Reconstruct and fingerprint historical source
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p diagnostic/extracted
+          : > diagnostic/baseline.zip
+          while IFS= read -r part; do
+            tr -d '\r\n' < "$part" | base64 --decode --ignore-garbage >> diagnostic/baseline.zip
+          done < <(find build_projection -maxdepth 1 -type f -name 'buildproj.part*.b64' | sort)
+          echo 'ARCHIVE_SHA256:'
+          sha256sum diagnostic/baseline.zip
+          unzip -t diagnostic/baseline.zip >/dev/null
+          unzip -q diagnostic/baseline.zip -d diagnostic/extracted
+          PACKAGE_JSON="$(find diagnostic/extracted -maxdepth 3 -type f -name package.json -not -path '*/node_modules/*' -print -quit)"
+          test -n "$PACKAGE_JSON"
+          PROJECT_ROOT="$(dirname "$PACKAGE_JSON")"
+          echo "PROJECT_ROOT=$PROJECT_ROOT"
+          echo 'PACKAGE_JSON_SHA256:'
+          sha256sum "$PROJECT_ROOT/package.json"
+          echo 'PACKAGE_LOCK_SHA256:'
+          sha256sum "$PROJECT_ROOT/package-lock.json"
+          echo 'WORKFLOW_SHA256:'
+          sha256sum "$PROJECT_ROOT/.github/workflows/android-build.yml"
+          PROJECT_ROOT="$PROJECT_ROOT" python - <<'PY'
+          from pathlib import Path
+          import hashlib, os
+          root=Path(os.environ['PROJECT_ROOT'])
+          rows=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file():
+                  rel=p.relative_to(root).as_posix()
+                  rows.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {rel}\n")
+          print('FILE_COUNT:',len(rows))
+          print('TREE_DIGEST:',hashlib.sha256(''.join(rows).encode()).hexdigest())
+          PY
