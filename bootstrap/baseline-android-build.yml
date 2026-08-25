@@ -1,0 +1,150 @@
+name: Code Dump Tool Android Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-dump-tool-android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: true
+
+jobs:
+  verify-and-build:
+    name: Verify and build APK/AAB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Set up Java 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
+        with:
+          cmdline-tools-version: '14742923'
+          packages: ''
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install Android SDK API 36 and Build Tools 36.0.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          test -f "$ANDROID_SDK_ROOT/platforms/android-36/android.jar"
+          test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt2"
+
+      - name: Install pinned Capacitor dependencies reproducibly
+        run: npm ci --no-audit --no-fund
+
+      - name: Verify repository, web and Android conversion source
+        run: npm run verify:repository
+
+      - name: Prepare Capacitor Android project
+        run: npm run android:prepare
+
+      - name: Verify generated Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f android/gradlew
+          test -f android/gradle/wrapper/gradle-wrapper.properties
+          test -f android/app/src/main/java/app/codedump/tool/MainActivity.kt
+          test -f android/app/src/main/java/app/codedump/tool/CodeDumpNativePlugin.kt
+          test -f android/app/src/main/res/xml/file_paths.xml
+          grep -q "com.android.tools.build:gradle:8.13.2" android/build.gradle
+          grep -q "org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.20" android/build.gradle
+          grep -q "org.jetbrains.kotlin.android" android/app/build.gradle
+          grep -q "androidx.documentfile:documentfile:1.1.0" android/app/build.gradle
+          grep -q "sourceCompatibility JavaVersion.VERSION_21" android/app/build.gradle
+          grep -q "jvmTarget = '21'" android/app/build.gradle
+
+      - name: Set up Gradle cache and wrapper validation
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - name: Run Gradle tests, lint, APK and AAB builds
+        working-directory: android
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace \
+            testDebugUnitTest \
+            lintDebug \
+            assembleDebug \
+            assembleRelease \
+            bundleRelease
+
+      - name: Stage build outputs and SHA-256 checksums
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts/
+          cp package-lock.json artifacts/package-lock.json
+          find android/app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -exec cp {} artifacts/ \;
+          find android/app/build/outputs/bundle/release -maxdepth 1 -type f -name '*.aab' -exec cp {} artifacts/ \;
+          if [ -f android/app/build/reports/lint-results-debug.html ]; then
+            cp android/app/build/reports/lint-results-debug.html artifacts/
+          fi
+          {
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Commit: $GITHUB_SHA"
+            echo "Run: $GITHUB_RUN_ID"
+            echo "Capacitor: 8.5.0"
+            echo "AGP: 8.13.2"
+            echo "Kotlin: 2.3.20"
+            echo "Java: 21"
+            echo "Node: 22"
+            echo "Runner: ubuntu-24.04"
+            echo "Android SDK: API 36 / Build Tools 36.0.0"
+            echo "Android setup action: v4.0.1"
+          } > artifacts/BUILD_INFO.txt
+          (cd artifacts && sha256sum *.apk *.aab package-lock.json 2>/dev/null | sort > SHA256SUMS.txt)
+          cat artifacts/SHA256SUMS.txt
+
+      - name: Upload Android build artefacts
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: code-dump-tool-android-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 30
+          path: artifacts/
+
+      - name: Upload Gradle reports on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: code-dump-tool-android-failure-${{ github.run_number }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            android/app/build/reports/
+            android/app/build/test-results/
+            android/app/build/outputs/logs/
