@@ -1,0 +1,176 @@
+name: Code Dump Tool Verified-Host Repository Bootstrap
+
+on:
+  push:
+    branches: [ codedump-v1.1.0-capacitor-build ]
+    paths:
+      - '.github/workflows/bootstrap-from-verified-host.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: code-dump-tool-verified-host-bootstrap
+  cancel-in-progress: false
+
+jobs:
+  normalise:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout target build host
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Checkout verified prior Code Dump Tool build host
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cstonepts-prog/quay-ops-android
+          ref: 742e2f03ee0e36cd743c0be89345dae8eb1be0b9
+          path: _verified_host
+          persist-credentials: false
+
+      - name: Reconstruct and verify authoritative baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILD_B64=/tmp/cdt-build.b64
+          BUILD_XZ=/tmp/cdt-build.tar.xz
+          BUILD_DIR=/tmp/cdt-build
+          rm -rf "$BUILD_DIR" "$BUILD_B64" "$BUILD_XZ"
+          head -c 9000 _verified_host/.codedump2/part00.b64 > "$BUILD_B64"
+          for i in $(seq -w 1 13); do cat "_verified_host/.codedump2/part${i}.b64" >> "$BUILD_B64"; done
+          test "$(wc -c < "$BUILD_B64")" -eq 123384
+          base64 --decode "$BUILD_B64" > "$BUILD_XZ"
+          echo "02fe87bea2103f93571a52ec6936efe0153cb2fa47597229699f1af074ac5b16  $BUILD_XZ" | sha256sum -c -
+          mkdir -p "$BUILD_DIR"
+          tar -xJf "$BUILD_XZ" -C "$BUILD_DIR"
+          test -f "$BUILD_DIR/package.json"
+          test -f "$BUILD_DIR/package-lock.json"
+          test -f "$BUILD_DIR/.github/workflows/android-build.yml"
+          echo "BUILD_DIR=$BUILD_DIR" >> "$GITHUB_ENV"
+
+      - name: Apply verified prior Android remediation
+        shell: bash
+        run: |
+          set -euo pipefail
+          PATCH="$GITHUB_WORKSPACE/_verified_host/.codedump2/capacitor-reject-throwable-fix.patch"
+          echo "07a1266095df13ee0016c00b895a77b70d362af6642540f9dcc54107b5852fba  $PATCH" | sha256sum -c -
+          (cd "$BUILD_DIR" && patch --batch -p1 < "$PATCH")
+          grep -Fq 'private fun rejectionException(t: Throwable): Exception' "$BUILD_DIR/native/android-overlay/app/src/main/java/app/codedump/tool/CodeDumpNativePlugin.kt"
+          ! grep -Fq 'takePersistableUriPermission(uri, take)' "$BUILD_DIR/native/android-overlay/app/src/main/java/app/codedump/tool/CodeDumpNativePlugin.kt"
+
+      - name: Apply authority-correction delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat bootstrap/source_patch.part* | base64 -d | gzip -d > /tmp/source.patch
+          echo "7ad2f09c9f053f690e69e2132488382e0773fe82ee55ee50b4e781cd22723804  /tmp/source.patch" | sha256sum -c -
+          (cd "$BUILD_DIR" && patch -p5 --batch --forward < /tmp/source.patch)
+          grep -Fq '**Rules-Version:** 1.2.16' "$BUILD_DIR/docs/MASTER_LLM_OPERATING_RULES.md"
+          grep -Fq '**Revision:** 20260825-02' "$BUILD_DIR/docs/MASTER_LLM_OPERATING_RULES.md"
+
+      - name: Apply GitHub audit-remediation delta
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat bootstrap/runtime_patch.part* | base64 -d | gzip -d > /tmp/runtime.patch
+          echo "7c474c5a3a57e92a77022aa09613702d3f13d1243d5b7123b77edb5d21d1be55  /tmp/runtime.patch" | sha256sum -c -
+          (cd "$BUILD_DIR" && patch -p1 --batch --forward < /tmp/runtime.patch)
+          grep -Fq 'actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.6.0' "$BUILD_DIR/.github/workflows/android-build.yml"
+          grep -Fq 'Verify APK identity and signature' "$BUILD_DIR/.github/workflows/android-build.yml"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Verify remediated source
+        working-directory: /tmp/cdt-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm test
+          npm run verify:repository
+          test "$(node -p "require('./package.json').version")" = "1.1.0"
+
+      - name: Prepare clean authoritative repository tree
+        working-directory: /tmp/cdt-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf node_modules android artifacts EXEC002_R5_EVIDENCE
+          rm -f ANDROID_BUILD_VERIFICATION_25082026040923.md GITHUB_BUILD_VERIFICATION_25082026044534.md GITHUB_REPOSITORY_COMPLIANCE_AUDIT_25082026043214.md PACKAGE_MANIFEST.json REM002_REMEDIATION_LEDGER_24082026082800.md REM002_REMEDIATION_LEDGER_25082026040923.md REMEDIATION_VERIFICATION_24082026082800.md REMEDIATION_VERIFICATION_25082026040923.md
+          cat > GITHUB_IMPORT_INSTRUCTIONS.md <<'EOF'
+          # GitHub Repository Operation
+
+          Code Dump Tool v1.1.0 is committed directly at repository root. The authoritative Android build workflow is `.github/workflows/android-build.yml`.
+
+          - Pushes and pull requests targeting `main` run the Android verification/build pipeline.
+          - `workflow_dispatch` is available from the default branch.
+          - The debug APK is directly installable for device testing and does not require production signing secrets.
+          - Production signing remains a separate owner-controlled release gate.
+          - Verify each downloaded Actions artefact against its `SHA256SUMS.txt` before use.
+          EOF
+          STAMP="$(TZ=Europe/London date +%d%m%Y%H%M%S)"
+          cat > "docs/GITHUB_REPOSITORY_REMEDIATION_${STAMP}.md" <<EOF
+          # Code Dump Tool GitHub Repository Remediation
+
+          **Bootstrap run:** $GITHUB_RUN_ID  
+          **Bootstrap commit:** $GITHUB_SHA  
+          **Application:** Code Dump Tool v1.1.0  
+          **Package:** \`app.codedump.tool\`  
+          **Master Rules:** v1.2.16 / revision 20260825-02
+
+          Baseline source was reconstructed from verified prior build-host commit \`742e2f03ee0e36cd743c0be89345dae8eb1be0b9\` and SHA-256 verified as \`02fe87bea2103f93571a52ec6936efe0153cb2fa47597229699f1af074ac5b16\`. The prior Android remediation, authority correction, and GitHub audit-remediation deltas were each SHA-256 verified before application. Source tests and repository verification passed before normalisation.
+
+          A separate fresh Android CI run is required for new APK evidence.
+          EOF
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          root=Path('.')
+          excluded_dirs={'.git','node_modules','android','artifacts'}
+          excluded_files={'REPOSITORY_MANIFEST.json','SHA256SUMS.txt'}
+          rows=[]
+          for p in sorted(root.rglob('*')):
+              if not p.is_file(): continue
+              rel=p.relative_to(root)
+              if any(part in excluded_dirs for part in rel.parts) or rel.as_posix() in excluded_files: continue
+              data=p.read_bytes(); rows.append({'path':rel.as_posix(),'size_bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+          manifest={'schema':1,'project':'Code Dump Tool','version':'1.1.0','classification':'GitHub repository','file_count':len(rows),'files':rows}
+          Path('REPOSITORY_MANIFEST.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
+          mb=Path('REPOSITORY_MANIFEST.json').read_bytes()
+          rows.append({'path':'REPOSITORY_MANIFEST.json','size_bytes':len(mb),'sha256':hashlib.sha256(mb).hexdigest()})
+          Path('SHA256SUMS.txt').write_text(''.join(f"{r['sha256']}  {r['path']}\n" for r in sorted(rows,key=lambda r:r['path'])),encoding='utf-8')
+          PY
+          npm test
+          npm run verify:repository
+
+      - name: Replace build host with clean source and promote to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -a /tmp/cdt-build/. "$GITHUB_WORKSPACE"/
+          cd "$GITHUB_WORKSPACE"
+          test -f .github/workflows/android-build.yml
+          test -f package.json
+          test ! -e build_projection
+          test ! -e codedump-source
+          test ! -e bootstrap
+          test ! -e _verified_host
+          npm test
+          npm run verify:repository
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Normalise Code Dump Tool v1.1.0 GitHub build source'
+          NORMALISED_SHA="$(git rev-parse HEAD)"
+          echo "NORMALISED_SHA=$NORMALISED_SHA"
+          git push origin HEAD:codedump-v1.1.0-capacitor-build
+          git push origin HEAD:main
