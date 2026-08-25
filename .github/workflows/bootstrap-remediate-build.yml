@@ -1,4 +1,4 @@
-name: Code Dump Tool One-Time GitHub Remediation Build
+name: Code Dump Tool One-Time GitHub Remediation
 
 on:
   push:
@@ -18,10 +18,10 @@ env:
   CI: true
 
 jobs:
-  remediate-build-normalise:
-    name: Reconstruct, verify, build and normalise repository
+  normalise-repository:
+    name: Reconstruct, verify and normalise repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 20
 
     steps:
       - name: Checkout remediation branch
@@ -36,7 +36,10 @@ jobs:
           set -euo pipefail
           rm -rf bootstrap-work
           mkdir -p bootstrap-work/extracted
-          cat build_projection/buildproj.part*.b64 | base64 -d > bootstrap-work/baseline.zip
+          : > bootstrap-work/baseline.zip
+          while IFS= read -r part; do
+            tr -d '\r\n' < "$part" | base64 --decode --ignore-garbage >> bootstrap-work/baseline.zip
+          done < <(find build_projection -maxdepth 1 -type f -name 'buildproj.part*.b64' | sort)
           echo "b1f0de04eab6c02ea6adc35ec74c7520dcff63b3d4c16d1ffe668fa0c71e136b  bootstrap-work/baseline.zip" | sha256sum -c -
           unzip -q bootstrap-work/baseline.zip -d bootstrap-work/extracted
           PACKAGE_JSON="$(find bootstrap-work/extracted -maxdepth 3 -type f -name package.json -not -path '*/node_modules/*' -print -quit)"
@@ -70,34 +73,8 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: ${{ env.PROJECT_ROOT }}/package-lock.json
 
-      - name: Set up Java 21
-        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.6.0
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Android SDK command-line tools
-        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4.0.1
-        with:
-          cmdline-tools-version: '14742923'
-          packages: ''
-          accept-android-sdk-licenses: true
-          log-accepted-android-sdk-licenses: false
-
-      - name: Install Android SDK API 36 and Build Tools 36.0.0
-        shell: bash
-        run: |
-          set -euo pipefail
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-          test -f "$ANDROID_SDK_ROOT/platforms/android-36/android.jar"
-          test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt"
-          test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt2"
-          test -x "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
-
-      - name: Install dependencies and verify remediated repository
+      - name: Verify authority-corrected repository
         working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
         run: |
@@ -105,106 +82,14 @@ jobs:
           npm ci --no-audit --no-fund
           npm test
           npm run verify:repository
+          test "$(node -p "require('./package.json').version")" = "1.1.0"
 
-      - name: Prepare Capacitor Android project
-        working-directory: ${{ env.PROJECT_ROOT }}
-        run: npm run android:prepare
-
-      - name: Verify generated Android project
+      - name: Prepare clean GitHub repository tree
         working-directory: ${{ env.PROJECT_ROOT }}
         shell: bash
         run: |
           set -euo pipefail
-          test -f android/gradlew
-          test -f android/gradle/wrapper/gradle-wrapper.properties
-          test -f android/app/src/main/java/app/codedump/tool/MainActivity.kt
-          test -f android/app/src/main/java/app/codedump/tool/CodeDumpNativePlugin.kt
-          grep -q "com.android.tools.build:gradle:8.13.2" android/build.gradle
-          grep -q "org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.20" android/build.gradle
-          grep -q "sourceCompatibility JavaVersion.VERSION_21" android/app/build.gradle
-          grep -q "jvmTarget = '21'" android/app/build.gradle
-          APP_VERSION="$(node -p "require('./package.json').version")"
-          test "$APP_VERSION" = "1.1.0"
-          grep -Fq "versionName \"$APP_VERSION\"" android/app/build.gradle
-          grep -Fq 'applicationId "app.codedump.tool"' android/app/build.gradle
-
-      - name: Set up Gradle cache and wrapper validation
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
-
-      - name: Run Gradle tests, lint, APK and AAB builds
-        working-directory: ${{ env.PROJECT_ROOT }}/android
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace testDebugUnitTest lintDebug assembleDebug assembleRelease bundleRelease
-
-      - name: Verify fresh APK identity, SDK metadata and signature
-        working-directory: ${{ env.PROJECT_ROOT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          DEBUG_APK="android/app/build/outputs/apk/debug/app-debug.apk"
-          test -f "$DEBUG_APK"
-          APP_VERSION="$(node -p "require('./package.json').version")"
-          AAPT="$ANDROID_SDK_ROOT/build-tools/36.0.0/aapt"
-          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
-          "$AAPT" dump badging "$DEBUG_APK" | tee APK_BADGING.txt
-          grep -Fq "package: name='app.codedump.tool'" APK_BADGING.txt
-          grep -Fq "versionName='$APP_VERSION'" APK_BADGING.txt
-          grep -Fq "sdkVersion:'24'" APK_BADGING.txt
-          grep -Fq "targetSdkVersion:'36'" APK_BADGING.txt
-          "$APKSIGNER" verify --verbose --print-certs "$DEBUG_APK" | tee APKSIGNER_VERIFY.txt
-          grep -Eq 'Verified using v2 scheme \(APK Signature Scheme v2\): true|Verifies' APKSIGNER_VERIFY.txt
-
-      - name: Stage fresh build artefacts and evidence
-        working-directory: ${{ env.PROJECT_ROOT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf artifacts
-          mkdir -p artifacts
-          cp android/app/build/outputs/apk/debug/app-debug.apk artifacts/
-          cp package-lock.json artifacts/package-lock.json
-          cp APK_BADGING.txt APKSIGNER_VERIFY.txt artifacts/
-          find android/app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -exec cp {} artifacts/ \;
-          find android/app/build/outputs/bundle/release -maxdepth 1 -type f -name '*.aab' -exec cp {} artifacts/ \;
-          if [ -f android/app/build/reports/lint-results-debug.html ]; then cp android/app/build/reports/lint-results-debug.html artifacts/; fi
-          {
-            echo "Repository: $GITHUB_REPOSITORY"
-            echo "Bootstrap commit: $GITHUB_SHA"
-            echo "Run: $GITHUB_RUN_ID"
-            echo "Application: Code Dump Tool 1.1.0"
-            echo "Package: app.codedump.tool"
-            echo "Master Rules: 1.2.16 / 20260825-02"
-            echo "Baseline ZIP SHA-256: b1f0de04eab6c02ea6adc35ec74c7520dcff63b3d4c16d1ffe668fa0c71e136b"
-            echo "Authority patch SHA-256: 7ad2f09c9f053f690e69e2132488382e0773fe82ee55ee50b4e781cd22723804"
-            echo "GitHub remediation patch SHA-256: 7c474c5a3a57e92a77022aa09613702d3f13d1243d5b7123b77edb5d21d1be55"
-            echo "Capacitor: 8.5.0"
-            echo "AGP: 8.13.2"
-            echo "Kotlin: 2.3.20"
-            echo "Java: 21"
-            echo "Node: 22"
-            echo "Runner: ubuntu-24.04"
-            echo "Android SDK: API 36 / Build Tools 36.0.0"
-          } > artifacts/BUILD_INFO.txt
-          (cd artifacts && sha256sum *.apk *.aab package-lock.json 2>/dev/null | sort > SHA256SUMS.txt)
-          cat artifacts/SHA256SUMS.txt
-
-      - name: Upload fresh Android build artefacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: code-dump-tool-android-remediated-${{ github.run_number }}
-          if-no-files-found: error
-          retention-days: 30
-          path: ${{ env.PROJECT_ROOT }}/artifacts/
-
-      - name: Normalise repository to clean authority-corrected source root
-        working-directory: ${{ env.PROJECT_ROOT }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf android node_modules artifacts EXEC002_R5_EVIDENCE
+          rm -rf node_modules android artifacts EXEC002_R5_EVIDENCE
           rm -f \
             ANDROID_BUILD_VERIFICATION_25082026040923.md \
             GITHUB_BUILD_VERIFICATION_25082026044534.md \
@@ -228,18 +113,18 @@ jobs:
           EOF
 
           STAMP="$(TZ=Europe/London date +%d%m%Y%H%M%S)"
-          cat > "docs/GITHUB_BUILD_VERIFICATION_${STAMP}.md" <<EOF
-          # Code Dump Tool GitHub Remediation Build Verification
+          cat > "docs/GITHUB_REPOSITORY_REMEDIATION_${STAMP}.md" <<EOF
+          # Code Dump Tool GitHub Repository Remediation
 
-          **Run:** $GITHUB_RUN_ID  
+          **Bootstrap run:** $GITHUB_RUN_ID  
           **Bootstrap commit:** $GITHUB_SHA  
           **Application:** Code Dump Tool v1.1.0  
           **Package:** \`app.codedump.tool\`  
           **Master Rules:** v1.2.16 / revision 20260825-02
 
-          The one-time remediation workflow reconstructed the verified earlier source capsule, applied the authority-correction delta and GitHub audit-remediation delta, executed source verification, generated the Capacitor Android project, ran Gradle unit tests and lint, built debug/release APKs and the release AAB, and verified the fresh debug APK package/version/SDK metadata and APK signature before artefact upload.
+          The selected GitHub build host was normalised from its verified historical source capsule to the authority-corrected Code Dump Tool source. The authority-correction and GitHub audit-remediation deltas were SHA-256 verified before application. Source tests and repository verification passed before this clean tree was committed.
 
-          Production signing and physical-device acceptance remain separate gates and are not represented as completed by this CI run.
+          A separate fresh Android CI run is still required to establish new APK build evidence from this normalised repository.
           EOF
 
           python - <<'PY'
@@ -250,17 +135,16 @@ jobs:
           excluded_files = {'REPOSITORY_MANIFEST.json', 'SHA256SUMS.txt'}
           rows = []
           for p in sorted(root.rglob('*')):
-              if not p.is_file():
-                  continue
+              if not p.is_file(): continue
               rel = p.relative_to(root)
-              if any(part in excluded_dirs for part in rel.parts) or rel.as_posix() in excluded_files:
-                  continue
+              if any(part in excluded_dirs for part in rel.parts) or rel.as_posix() in excluded_files: continue
               data = p.read_bytes()
               rows.append({'path': rel.as_posix(), 'size_bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
           manifest = {'schema': 1, 'project': 'Code Dump Tool', 'version': '1.1.0', 'classification': 'GitHub repository', 'file_count': len(rows), 'files': rows}
           Path('REPOSITORY_MANIFEST.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-          checksum_rows = rows + [{'path':'REPOSITORY_MANIFEST.json','size_bytes':Path('REPOSITORY_MANIFEST.json').stat().st_size,'sha256':hashlib.sha256(Path('REPOSITORY_MANIFEST.json').read_bytes()).hexdigest()}]
-          Path('SHA256SUMS.txt').write_text(''.join(f"{r['sha256']}  {r['path']}\n" for r in sorted(checksum_rows, key=lambda r:r['path'])), encoding='utf-8')
+          manifest_bytes = Path('REPOSITORY_MANIFEST.json').read_bytes()
+          rows2 = rows + [{'path':'REPOSITORY_MANIFEST.json','size_bytes':len(manifest_bytes),'sha256':hashlib.sha256(manifest_bytes).hexdigest()}]
+          Path('SHA256SUMS.txt').write_text(''.join(f"{r['sha256']}  {r['path']}\n" for r in sorted(rows2, key=lambda r:r['path'])), encoding='utf-8')
           PY
           npm test
           npm run verify:repository
@@ -296,7 +180,4 @@ jobs:
           git push origin HEAD:main
 
       - name: Record normalised commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Normalised repository commit: $NORMALISED_SHA"
+        run: echo "Normalised repository commit $NORMALISED_SHA"
