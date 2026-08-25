@@ -45,7 +45,6 @@ jobs:
           mkdir -p /tmp/cdt-build
           tar -xJf /tmp/cdt-build.tar.xz -C /tmp/cdt-build
           test -f /tmp/cdt-build/package.json
-          test -f /tmp/cdt-build/package-lock.json
           test -f /tmp/cdt-build/scripts/prepare-android.mjs
           test -f /tmp/cdt-build/web/index.html
 
@@ -85,11 +84,14 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Verify corrected source before promotion
+      - name: Generate lockfile and verify corrected source before promotion
         working-directory: /tmp/cdt-build
         shell: bash
         run: |
           set -euo pipefail
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          test -s package-lock.json
+          echo "60844314cd4a6da894912049390740425baf80d31766c12b2bc559f4e5d5651c  package-lock.json" | sha256sum -c -
           npm ci --no-audit --no-fund
           npm test
           npm run verify:repository
@@ -119,7 +121,7 @@ jobs:
           Package: app.codedump.tool  
           Master Rules: v1.2.16 / revision 20260825-02
 
-          Source transport SHA-256 02fe87bea2103f93571a52ec6936efe0153cb2fa47597229699f1af074ac5b16 was reconstructed from verified build-host commit 742e2f03ee0e36cd743c0be89345dae8eb1be0b9. The prior Android remediation, authority-correction delta, and GitHub audit-remediation delta were each SHA-256 verified before application. Source tests and repository verification passed before promotion.
+          Source transport SHA-256 02fe87bea2103f93571a52ec6936efe0153cb2fa47597229699f1af074ac5b16 was reconstructed from verified build-host commit 742e2f03ee0e36cd743c0be89345dae8eb1be0b9. The prior Android remediation, authority-correction delta, and GitHub audit-remediation delta were each SHA-256 verified before application. The deterministic package-lock.json matched SHA-256 60844314cd4a6da894912049390740425baf80d31766c12b2bc559f4e5d5651c. Source tests and repository verification passed before promotion.
           EOF
           python - <<'PY'
           from pathlib import Path
@@ -150,6 +152,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           test -f .github/workflows/android-build.yml
           test -f package.json
+          test -f package-lock.json
           test ! -e build_projection
           test ! -e codedump-source
           test ! -e bootstrap
