@@ -40,7 +40,7 @@ jobs:
           while IFS= read -r part; do
             tr -d '\r\n' < "$part" | base64 --decode --ignore-garbage >> bootstrap-work/baseline.zip
           done < <(find build_projection -maxdepth 1 -type f -name 'buildproj.part*.b64' | sort)
-          echo "b1f0de04eab6c02ea6adc35ec74c7520dcff63b3d4c16d1ffe668fa0c71e136b  bootstrap-work/baseline.zip" | sha256sum -c -
+          echo "02fe87bea2103f93571a52ec6936efe0153cb2fa47597229699f1af074ac5b16  bootstrap-work/baseline.zip" | sha256sum -c -
           unzip -q bootstrap-work/baseline.zip -d bootstrap-work/extracted
           PACKAGE_JSON="$(find bootstrap-work/extracted -maxdepth 3 -type f -name package.json -not -path '*/node_modules/*' -print -quit)"
           test -n "$PACKAGE_JSON"
