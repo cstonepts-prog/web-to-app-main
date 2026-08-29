@@ -1,0 +1,19 @@
+name: RepFlow Runner Smoke
+on:
+  push:
+    branches:
+      - repflow-capacitor-apk-build-290820262129
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Runner allocation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          uname -a
+          java -version || true
+          node --version || true
+          echo REPFLOW_RUNNER_OK
