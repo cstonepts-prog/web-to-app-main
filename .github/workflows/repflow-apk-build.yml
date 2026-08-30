@@ -154,6 +154,18 @@ jobs:
         run: |
           set -euxo pipefail
           bash scripts/bootstrap-capacitor.sh
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          text = manifest.read_text()
+          attr = 'android:networkSecurityConfig="@xml/network_security_config"'
+          if attr not in text:
+              patched, count = re.subn(r'<application\b', '<application ' + attr, text, count=1)
+              if count != 1:
+                  raise SystemExit('could not locate <application> in AndroidManifest.xml')
+              manifest.write_text(patched)
+          PY
           test -x android/gradlew
           grep -q 'net.nexarenew.repflow' capacitor.config.json
           grep -q 'android:networkSecurityConfig="@xml/network_security_config"' android/app/src/main/AndroidManifest.xml
