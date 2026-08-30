@@ -18,72 +18,53 @@ jobs:
       - name: Checkout build branch
         uses: actions/checkout@v4
 
-      - name: Diagnose and rehydrate exact RepFlow Capacitor source
+      - name: Rehydrate verified RepFlow Capacitor source
         shell: bash
         run: |
           set -euxo pipefail
           exec > >(tee -a /tmp/rehydrate-diagnostics.txt) 2>&1
-          EXPECTED=(
-            c4ea1db06db68c8252b2c007f0b70ad230cfe19b
-            fbe6961c75e0d42387107a5d1d2c5741f25fff10
-            b3a3098b1c1abc59e61213bf95f7f55ea18c2f1c
-            c158f6bae8dd7d9f2a390bbe3faa94dbad089366
-            f6483dd486f733f2722941568551b630c90c5b60
-            d67d5b4e027bc53a28015118212ca4ffaa68e926
-            896c6c90f5763b8db805c2224938d6a9ae44ce5b
-            61fa67da8f2e08968bc77d79fdadea1d731ae206
-          )
-          i=0
-          for n in 01 02 03 04 05 06 07 08; do
-            f="repflow-ci/bundle.part${n}"
-            test -f "$f"
-            actual="$(git hash-object "$f")"
-            bytes="$(wc -c < "$f")"
-            echo "$f bytes=$bytes git_blob=$actual expected=${EXPECTED[$i]}"
-            test "$actual" = "${EXPECTED[$i]}"
-            i=$((i+1))
-          done
-          cat repflow-ci/bundle.part{01..08} > /tmp/repflow.b64
           python - <<'PY'
-          import base64, binascii
+          import base64, hashlib
           from pathlib import Path
 
-          ws = set(b' \t\r\n\v\f')
-          alphabet = set(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
-          src = Path('/tmp/repflow.b64').read_bytes()
-          clean = bytes(b for b in src if b not in ws)
-          bad = [(i,b) for i,b in enumerate(src) if b not in alphabet and b not in ws]
-          print(f'bundle_raw_bytes={len(src)} bundle_clean_bytes={len(clean)} mod4={len(clean)%4} invalid_count={len(bad)}')
-          print('bundle_invalid_first20=' + repr(bad[:20]))
-          for pos,b in bad[:10]:
-              lo=max(0,pos-24); hi=min(len(src),pos+25)
-              print(f'bundle_invalid_context pos={pos} byte=0x{b:02x} context={src[lo:hi]!r}')
+          missing = (
+              'YT3oraAEOoExmrCvbriZLGtNW1R8oLm4te0OyJWTm/ny2J2uMalJxildbcSEH3f0'
+              'cgMnAt4K2c+fmL/qCchThhXseHwq9muNVKOgwGCDAMd3nY3iQ+aqmKKd6tyZqtv0fDSRmB7Z'
+          )
+          marker = '[... ELLIPSIZATION ...]'
 
-          payload_paths=[Path('repflow-ci/payload.part00'),Path('repflow-ci/payload.part01')]
-          if all(p.exists() for p in payload_paths):
-              psrc=b''.join(p.read_bytes() for p in payload_paths)
-              pclean=bytes(b for b in psrc if b not in ws)
-              pbad=[(i,b) for i,b in enumerate(psrc) if b not in alphabet and b not in ws]
-              print(f'payload01_raw_bytes={len(psrc)} payload01_clean_bytes={len(pclean)} mod4={len(pclean)%4} invalid_count={len(pbad)}')
-              print('payload01_invalid_first20=' + repr(pbad[:20]))
-              lcp=0
-              for a,b in zip(src,psrc):
-                  if a!=b: break
-                  lcp+=1
-              print(f'bundle_vs_payload_lcp={lcp}')
-              if lcp < min(len(src),len(psrc)):
-                  print(f'bundle_mismatch={src[max(0,lcp-32):lcp+64]!r}')
-                  print(f'payload_mismatch={psrc[max(0,lcp-32):lcp+64]!r}')
+          prefix = Path('repflow-ci/payload.part00').read_text() + Path('repflow-ci/payload.part01').read_text()
+          if len(prefix) != 40000:
+              raise SystemExit(f'unexpected clean prefix length: {len(prefix)}')
 
-          try:
-              out=base64.b64decode(clean, validate=True)
-          except binascii.Error as e:
-              print(f'base64_strict_error={e}')
-              raise
-          print(f'zip_bytes={len(out)} magic={out[:4]!r}')
-          if not out.startswith(b'PK'):
+          p6 = Path('repflow-ci/bundle.part06').read_text()
+          if p6.count(marker) != 1:
+              raise SystemExit(f'expected exactly one ellipsization marker in bundle.part06, found {p6.count(marker)}')
+          p6 = p6.replace(marker, missing)
+
+          pieces = [
+              prefix,
+              Path('repflow-ci/bundle.part03').read_text(),
+              Path('repflow-ci/bundle.part04').read_text(),
+              Path('repflow-ci/bundle.part05').read_text(),
+              p6,
+              Path('repflow-ci/bundle.part07').read_text(),
+              Path('repflow-ci/bundle.part08').read_text(),
+          ]
+          clean = ''.join(''.join(piece.split()) for piece in pieces)
+          print(f'reconstructed_base64_bytes={len(clean)} mod4={len(clean)%4}')
+          if len(clean) != 140412 or len(clean) % 4:
+              raise SystemExit('reconstructed Base64 length mismatch')
+
+          data = base64.b64decode(clean, validate=True)
+          digest = hashlib.sha256(data).hexdigest()
+          print(f'reconstructed_zip_bytes={len(data)} sha256={digest} magic={data[:4]!r}')
+          expected = '5371b4804e07834689a3ef9aaff6abb412abc068a0ef3dd2388878018f26d255'
+          if digest != expected:
+              raise SystemExit(f'source ZIP SHA-256 mismatch: {digest} != {expected}')
+          if not data.startswith(b'PK'):
               raise SystemExit('decoded payload is not a ZIP')
-          Path('/tmp/repflow_android_slim.zip').write_bytes(out)
+          Path('/tmp/repflow_android_slim.zip').write_bytes(data)
           PY
           unzip -t /tmp/repflow_android_slim.zip
           mkdir -p repflow
