@@ -1,0 +1,139 @@
+name: RepFlow APK Build
+
+on:
+  push:
+    branches:
+      - repflow-capacitor-apk-build-290820262129
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-repflow-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Rehydrate exact RepFlow Capacitor source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat repflow-ci/bundle.part* | tr -d '\n\r ' | base64 -d > /tmp/repflow_android_slim.zip
+          unzip -t /tmp/repflow_android_slim.zip
+          mkdir -p repflow
+          unzip -q /tmp/repflow_android_slim.zip -d repflow
+          sha256sum /tmp/repflow_android_slim.zip | tee /tmp/source-sha256.txt
+          test -f repflow/package.json
+          test -f repflow/capacitor.config.json
+          test -f repflow/scripts/bootstrap-capacitor.sh
+          test -f repflow/scripts/patch-android.py
+          test -f repflow/web/index.html
+
+      - name: Install exact Capacitor dependencies
+        working-directory: repflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm install --no-audit --no-fund
+
+      - name: Verify exact Capacitor versions
+        working-directory: repflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          node - <<'NODE'
+          const deps=['@capacitor/core','@capacitor/android','@capacitor/cli'];
+          for (const d of deps) {
+            const v=require(`./node_modules/${d}/package.json`).version;
+            console.log(`${d}=${v}`);
+            if (v !== '8.5.0') process.exit(1);
+          }
+          NODE
+
+      - name: Generate and patch native Android project
+        working-directory: repflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/bootstrap-capacitor.sh
+          test -x android/gradlew
+          grep -q 'net.nexarenew.repflow' capacitor.config.json
+          grep -q 'networkSecurityConfig="@xml/network_security_config"' android/app/src/main/AndroidManifest.xml
+          grep -q 'cleartextTrafficPermitted="false"' android/app/src/main/res/xml/network_security_config.xml
+          grep -q '>127.0.0.1<' android/app/src/main/res/xml/network_security_config.xml
+          grep -q '>localhost<' android/app/src/main/res/xml/network_security_config.xml
+
+      - name: Build debug APK
+        working-directory: repflow/android
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Verify APK identity, integrity and signature
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK="repflow/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          mkdir -p repflow-release
+          cp "$APK" repflow-release/RepFlow-debug.apk
+          sha256sum "$APK" | tee repflow-release/SHA256SUMS.txt
+          cp /tmp/source-sha256.txt repflow-release/SOURCE_SHA256.txt
+
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -perm -111 | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -perm -111 | sort -V | tail -n 1)"
+          test -x "$AAPT"
+          test -x "$APKSIGNER"
+
+          "$AAPT" dump badging "$APK" | tee repflow-release/aapt-badging.txt
+          grep -q "package: name='net.nexarenew.repflow'" repflow-release/aapt-badging.txt
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee repflow-release/apksigner-verification.txt
+          unzip -t "$APK" | tee repflow-release/apk-zip-test.txt
+
+          {
+            echo "node=$(node --version)"
+            echo "npm=$(npm --version)"
+            java -version 2>&1
+            echo
+            echo "Capacitor package manifest:"
+            cat repflow/package.json
+            echo
+            echo "Gradle wrapper:"
+            cat repflow/android/gradle/wrapper/gradle-wrapper.properties
+          } > repflow-release/toolchain.txt
+
+          cp repflow/android/app/build/outputs/apk/debug/output-metadata.json repflow-release/output-metadata.json
+
+      - name: Upload verified APK artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repflow-debug-apk
+          path: repflow-release/
+          if-no-files-found: error
+          retention-days: 7
