@@ -96,6 +96,8 @@ jobs:
           test -f repflow/scripts/bootstrap-capacitor.sh
           test -f repflow/scripts/patch-android.py
           test -f repflow/web/index.html
+          test -f repflow/web/icon-512.png
+          test -f repflow/web/icon-maskable-512.png
 
       - name: Upload rehydrate diagnostics
         if: always()
@@ -148,7 +150,7 @@ jobs:
           }
           NODE
 
-      - name: Generate and patch native Android project
+      - name: Generate and configure native Android project
         working-directory: repflow
         shell: bash
         run: |
@@ -157,21 +159,147 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import re
-          manifest = Path('android/app/src/main/AndroidManifest.xml')
+
+          root = Path('android/app/src/main')
+          manifest = root / 'AndroidManifest.xml'
           text = manifest.read_text()
-          attr = 'android:networkSecurityConfig="@xml/network_security_config"'
-          if attr not in text:
-              patched, count = re.subn(r'<application\b', '<application ' + attr, text, count=1)
+
+          # Configure only normal, least-privilege permissions actually used by RepFlow.
+          permissions = [
+              'android.permission.INTERNET',
+              'android.permission.ACCESS_NETWORK_STATE',
+              'android.permission.VIBRATE',
+              'android.permission.WAKE_LOCK',
+          ]
+          missing = [p for p in permissions if f'android:name="{p}"' not in text]
+          if missing:
+              tags = ''.join(f'    <uses-permission android:name="{p}" />\n' for p in missing)
+              text, count = re.subn(r'(<application\b)', tags + r'\1', text, count=1)
               if count != 1:
-                  raise SystemExit('could not locate <application> in AndroidManifest.xml')
-              manifest.write_text(patched)
+                  raise SystemExit('could not insert Android permissions')
+
+          # Lock native app identity/security metadata.
+          app_match = re.search(r'<application\b[^>]*>', text, re.S)
+          if not app_match:
+              raise SystemExit('could not locate <application> in AndroidManifest.xml')
+          app = app_match.group(0)
+          attrs = {
+              'networkSecurityConfig': '@xml/network_security_config',
+              'label': '@string/app_name',
+              'icon': '@mipmap/ic_launcher',
+              'roundIcon': '@mipmap/ic_launcher_round',
+              'allowBackup': 'false',
+              'fullBackupContent': 'false',
+              'supportsRtl': 'true',
+          }
+          for key, value in attrs.items():
+              pattern = rf'android:{re.escape(key)}="[^"]*"'
+              replacement = f'android:{key}="{value}"'
+              if re.search(pattern, app):
+                  app = re.sub(pattern, replacement, app, count=1)
+              else:
+                  app = app[:-1] + ' ' + replacement + '>'
+          text = text[:app_match.start()] + app + text[app_match.end():]
+          manifest.write_text(text)
+
+          # Lock app name in Android resources.
+          strings = root / 'res/values/strings.xml'
+          st = strings.read_text()
+          for key in ('app_name', 'title_activity_main'):
+              pat = rf'(<string\s+name="{key}">).*?(</string>)'
+              if re.search(pat, st, re.S):
+                  st = re.sub(pat, rf'\1RepFlow\2', st, count=1, flags=re.S)
+          strings.write_text(st)
+
+          res = root / 'res'
+          drawable = res / 'drawable'
+          drawable.mkdir(parents=True, exist_ok=True)
+
+          # Native vector foreground reproduces the RepFlow neon waveform and cyan ring.
+          foreground = '''<?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="512" android:viewportHeight="512">
+              <path android:pathData="M58,276 L141,276 L166,211 L208,366 L255,131 L296,292 L325,212 L350,276 L454,276"
+                  android:fillColor="@android:color/transparent"
+                  android:strokeColor="#CAFF00" android:strokeWidth="17"
+                  android:strokeLineCap="round" android:strokeLineJoin="round"/>
+              <path android:pathData="M256,216 A40,40 0,1 0,256,296 A40,40 0,1 0,256,216"
+                  android:fillColor="@android:color/transparent"
+                  android:strokeColor="#05C7F2" android:strokeWidth="12"
+                  android:strokeLineCap="round"/>
+          </vector>
+          '''
+          (drawable / 'ic_launcher_foreground.xml').write_text(foreground)
+
+          monochrome = foreground.replace('#CAFF00', '#FFFFFFFF').replace('#05C7F2', '#FFFFFFFF')
+          (drawable / 'ic_launcher_monochrome.xml').write_text(monochrome)
+
+          legacy = '''<?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="512" android:viewportHeight="512">
+              <path android:pathData="M0,0 L512,0 L512,512 L0,512 Z" android:fillColor="#030914"/>
+              <path android:pathData="M58,276 L141,276 L166,211 L208,366 L255,131 L296,292 L325,212 L350,276 L454,276"
+                  android:fillColor="@android:color/transparent"
+                  android:strokeColor="#CAFF00" android:strokeWidth="17"
+                  android:strokeLineCap="round" android:strokeLineJoin="round"/>
+              <path android:pathData="M256,216 A40,40 0,1 0,256,296 A40,40 0,1 0,256,216"
+                  android:fillColor="@android:color/transparent"
+                  android:strokeColor="#05C7F2" android:strokeWidth="12"
+                  android:strokeLineCap="round"/>
+          </vector>
+          '''
+
+          # Remove Capacitor's stock launcher art so no default icon can win resource selection.
+          for path in res.rglob('ic_launcher*'):
+              if path.is_file() and path.parent != drawable:
+                  path.unlink()
+
+          base = res / 'mipmap-anydpi'
+          base.mkdir(parents=True, exist_ok=True)
+          (base / 'ic_launcher.xml').write_text(legacy)
+          (base / 'ic_launcher_round.xml').write_text(legacy)
+
+          bg = res / 'values/ic_launcher_background.xml'
+          bg.write_text('<?xml version="1.0" encoding="utf-8"?>\n<resources><color name="ic_launcher_background">#030914</color></resources>\n')
+
+          adaptive26 = '''<?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+          </adaptive-icon>
+          '''
+          adaptive33 = '''<?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_launcher_background"/>
+              <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+              <monochrome android:drawable="@drawable/ic_launcher_monochrome"/>
+          </adaptive-icon>
+          '''
+          for qualifier, xml in (('mipmap-anydpi-v26', adaptive26), ('mipmap-anydpi-v33', adaptive33)):
+              d = res / qualifier
+              d.mkdir(parents=True, exist_ok=True)
+              (d / 'ic_launcher.xml').write_text(xml)
+              (d / 'ic_launcher_round.xml').write_text(xml)
+
+          print('configured RepFlow Android identity, launcher icons and least-privilege permissions')
           PY
+
           test -x android/gradlew
           grep -q 'net.nexarenew.repflow' capacitor.config.json
           grep -q 'android:networkSecurityConfig="@xml/network_security_config"' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:allowBackup="false"' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.ACCESS_NETWORK_STATE' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.VIBRATE' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.WAKE_LOCK' android/app/src/main/AndroidManifest.xml
           grep -q 'cleartextTrafficPermitted="false"' android/app/src/main/res/xml/network_security_config.xml
           grep -q '>127.0.0.1<' android/app/src/main/res/xml/network_security_config.xml
           grep -q '>localhost<' android/app/src/main/res/xml/network_security_config.xml
+          test -f android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          test -f android/app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
+          grep -q '<monochrome ' android/app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
 
       - name: Build debug APK
         working-directory: repflow/android
@@ -180,7 +308,7 @@ jobs:
           set -euxo pipefail
           ./gradlew --no-daemon assembleDebug
 
-      - name: Verify APK identity, integrity and signature
+      - name: Verify APK identity, permissions, icon, integrity and signature
         shell: bash
         run: |
           set -euxo pipefail
@@ -197,7 +325,19 @@ jobs:
           test -x "$APKSIGNER"
 
           "$AAPT" dump badging "$APK" | tee repflow-release/aapt-badging.txt
+          "$AAPT" dump permissions "$APK" | tee repflow-release/aapt-permissions.txt
           grep -q "package: name='net.nexarenew.repflow'" repflow-release/aapt-badging.txt
+          grep -q "application-label:'RepFlow'" repflow-release/aapt-badging.txt
+          grep -q "application-icon-.*:'res/.*ic_launcher" repflow-release/aapt-badging.txt
+          grep -q 'android.permission.INTERNET' repflow-release/aapt-permissions.txt
+          grep -q 'android.permission.ACCESS_NETWORK_STATE' repflow-release/aapt-permissions.txt
+          grep -q 'android.permission.VIBRATE' repflow-release/aapt-permissions.txt
+          grep -q 'android.permission.WAKE_LOCK' repflow-release/aapt-permissions.txt
+          if grep -Eq 'android.permission.(CAMERA|RECORD_AUDIO|ACCESS_FINE_LOCATION|ACCESS_COARSE_LOCATION|READ_CONTACTS|WRITE_CONTACTS|READ_SMS|SEND_SMS|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE)' repflow-release/aapt-permissions.txt; then
+            echo 'Unexpected dangerous/unneeded permission found' >&2
+            exit 1
+          fi
+
           "$APKSIGNER" verify --verbose --print-certs "$APK" | tee repflow-release/apksigner-verification.txt
           unzip -t "$APK" | tee repflow-release/apk-zip-test.txt
 
@@ -214,6 +354,8 @@ jobs:
           } > repflow-release/toolchain.txt
 
           cp repflow/android/app/build/outputs/apk/debug/output-metadata.json repflow-release/output-metadata.json
+          cp repflow/android/app/src/main/AndroidManifest.xml repflow-release/AndroidManifest.xml
+          cp repflow/android/app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml repflow-release/ic_launcher_v33.xml
 
       - name: Upload verified APK artefact
         uses: actions/upload-artifact@v4
