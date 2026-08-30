@@ -32,26 +32,48 @@ jobs:
               'cgMnAt4K2c+fmL/qCchThhXseHwq9muNVKOgwGCDAMd3nY3iQ+aqmKKd6tyZqtv0fDSRmB7Z'
           )
           marker = '[... ELLIPSIZATION ...]'
+          expected_p6 = '85adf70a0f854be654b70a82ba6947dc7d3496ff7ee23c4ba2e6a42823159a23'
+          expected_zip = '5371b4804e07834689a3ef9aaff6abb412abc068a0ef3dd2388878018f26d255'
 
           prefix = Path('repflow-ci/payload.part00').read_text() + Path('repflow-ci/payload.part01').read_text()
+          prefix = ''.join(prefix.split())
           if len(prefix) != 40000:
               raise SystemExit(f'unexpected clean prefix length: {len(prefix)}')
 
           p6 = Path('repflow-ci/bundle.part06').read_text()
           if p6.count(marker) != 1:
               raise SystemExit(f'expected exactly one ellipsization marker in bundle.part06, found {p6.count(marker)}')
-          p6 = p6.replace(marker, missing)
+          p6 = ''.join(p6.replace(marker, missing).split())
+          print(f'part06_after_marker_repair_len={len(p6)} sha256={hashlib.sha256(p6.encode()).hexdigest()}')
+
+          if hashlib.sha256(p6.encode()).hexdigest() != expected_p6:
+              if len(p6) != 20004:
+                  raise SystemExit(f'unexpected repaired part06 length: {len(p6)}')
+              recovered = None
+              for i in range(0, len(p6) - 3):
+                  candidate = p6[:i] + p6[i+4:]
+                  if hashlib.sha256(candidate.encode()).hexdigest() == expected_p6:
+                      recovered = candidate
+                      print(f'part06_recovered_by_deleting_position={i} chars={p6[i:i+4]!r}')
+                      break
+              if recovered is None:
+                  raise SystemExit('could not recover exact part06 via four-character deletion')
+              p6 = recovered
+
+          if len(p6) != 20000 or hashlib.sha256(p6.encode()).hexdigest() != expected_p6:
+              raise SystemExit('part06 clean hash/length gate failed')
+          print('part06_exact_hash_gate=PASS')
 
           pieces = [
               prefix,
-              Path('repflow-ci/bundle.part03').read_text(),
-              Path('repflow-ci/bundle.part04').read_text(),
-              Path('repflow-ci/bundle.part05').read_text(),
+              ''.join(Path('repflow-ci/bundle.part03').read_text().split()),
+              ''.join(Path('repflow-ci/bundle.part04').read_text().split()),
+              ''.join(Path('repflow-ci/bundle.part05').read_text().split()),
               p6,
-              Path('repflow-ci/bundle.part07').read_text(),
-              Path('repflow-ci/bundle.part08').read_text(),
+              ''.join(Path('repflow-ci/bundle.part07').read_text().split()),
+              ''.join(Path('repflow-ci/bundle.part08').read_text().split()),
           ]
-          clean = ''.join(''.join(piece.split()) for piece in pieces)
+          clean = ''.join(pieces)
           print(f'reconstructed_base64_bytes={len(clean)} mod4={len(clean)%4}')
           if len(clean) != 140412 or len(clean) % 4:
               raise SystemExit('reconstructed Base64 length mismatch')
@@ -59,9 +81,8 @@ jobs:
           data = base64.b64decode(clean, validate=True)
           digest = hashlib.sha256(data).hexdigest()
           print(f'reconstructed_zip_bytes={len(data)} sha256={digest} magic={data[:4]!r}')
-          expected = '5371b4804e07834689a3ef9aaff6abb412abc068a0ef3dd2388878018f26d255'
-          if digest != expected:
-              raise SystemExit(f'source ZIP SHA-256 mismatch: {digest} != {expected}')
+          if digest != expected_zip:
+              raise SystemExit(f'source ZIP SHA-256 mismatch: {digest} != {expected_zip}')
           if not data.startswith(b'PK'):
               raise SystemExit('decoded payload is not a ZIP')
           Path('/tmp/repflow_android_slim.zip').write_bytes(data)
