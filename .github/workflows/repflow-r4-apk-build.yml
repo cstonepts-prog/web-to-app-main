@@ -1,0 +1,290 @@
+name: RepFlow R4 APK Build
+
+on:
+  push:
+    branches:
+      - repflow-r4-apk-build-30082026213817
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-repflow-r4-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout R4 build branch
+        uses: actions/checkout@v4
+
+      - name: Rehydrate proven Android baseline and materialize exact R4 projection
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p repflow-release
+          exec > >(tee -a repflow-release/rehydrate-diagnostics.txt) 2>&1
+          python - <<'PY'
+          import base64, hashlib
+          from pathlib import Path
+
+          missing = (
+              'YT3oraAEOoExmrCvbriZLGtNW1R8oLm4te0OyJWTm/ny2J2uMalJxildbcSEH3f0'
+              'cgMnAt4K2c+fmL/qCchThhXseHwq9muNVKOgwGCDAMd3nY3iQ+aqmKKd6tyZqtv0fDSRmB7Z'
+          )
+          marker = '[... ELLIPSIZATION ...]'
+          expected_p6 = '85adf70a0f854be654b70a82ba6947dc7d3496ff7ee23c4ba2e6a42823159a23'
+          expected_zip = '5371b4804e07834689a3ef9aaff6abb412abc068a0ef3dd2388878018f26d255'
+
+          prefix = Path('repflow-ci/payload.part00').read_text() + Path('repflow-ci/payload.part01').read_text()
+          prefix = ''.join(prefix.split())
+          if len(prefix) != 40000:
+              raise SystemExit(f'unexpected clean prefix length: {len(prefix)}')
+
+          p6 = Path('repflow-ci/bundle.part06').read_text()
+          if p6.count(marker) != 1:
+              raise SystemExit(f'expected exactly one ellipsization marker in bundle.part06, found {p6.count(marker)}')
+          p6 = ''.join(p6.replace(marker, missing).split())
+          if hashlib.sha256(p6.encode()).hexdigest() != expected_p6:
+              if len(p6) != 20004:
+                  raise SystemExit(f'unexpected repaired part06 length: {len(p6)}')
+              recovered = None
+              for i in range(0, len(p6) - 3):
+                  candidate = p6[:i] + p6[i+4:]
+                  if hashlib.sha256(candidate.encode()).hexdigest() == expected_p6:
+                      recovered = candidate
+                      print(f'part06_recovered_by_deleting_position={i} chars={p6[i:i+4]!r}')
+                      break
+              if recovered is None:
+                  raise SystemExit('could not recover exact part06 via four-character deletion')
+              p6 = recovered
+
+          if len(p6) != 20000 or hashlib.sha256(p6.encode()).hexdigest() != expected_p6:
+              raise SystemExit('part06 exact hash/length gate failed')
+
+          pieces = [
+              prefix,
+              ''.join(Path('repflow-ci/bundle.part03').read_text().split()),
+              ''.join(Path('repflow-ci/bundle.part04').read_text().split()),
+              ''.join(Path('repflow-ci/bundle.part05').read_text().split()),
+              p6,
+              ''.join(Path('repflow-ci/bundle.part07').read_text().split()),
+              ''.join(Path('repflow-ci/bundle.part08').read_text().split()),
+          ]
+          clean = ''.join(pieces)
+          if len(clean) != 140412 or len(clean) % 4:
+              raise SystemExit(f'reconstructed Base64 length mismatch: {len(clean)}')
+          data = base64.b64decode(clean, validate=True)
+          digest = hashlib.sha256(data).hexdigest()
+          if digest != expected_zip or not data.startswith(b'PK'):
+              raise SystemExit(f'baseline ZIP integrity gate failed: {digest}')
+          Path('/tmp/repflow_android_slim.zip').write_bytes(data)
+          print(f'baseline_zip_sha256={digest}')
+          PY
+
+          unzip -t /tmp/repflow_android_slim.zip
+          rm -rf repflow
+          mkdir -p repflow
+          unzip -q /tmp/repflow_android_slim.zip -d repflow
+
+          base64 -d repflow-ci/r4-index.patch.gz.b64 | gzip -dc > /tmp/r4-index.patch
+          patch --batch --forward repflow/web/index.html /tmp/r4-index.patch
+          cp repflow-ci/r4-package.json repflow/package.json
+          cp repflow-ci/r4-bootstrap-capacitor.sh repflow/scripts/bootstrap-capacitor.sh
+          cp repflow-ci/r4-patch-android.py repflow/scripts/patch-android.py
+          chmod +x repflow/scripts/bootstrap-capacitor.sh repflow/scripts/patch-android.py
+
+          sha256sum repflow/web/index.html | tee repflow-release/R4_WEB_INDEX_SHA256.txt
+          sha256sum repflow/package.json | tee repflow-release/R4_PACKAGE_SHA256.txt
+          sha256sum repflow/capacitor.config.json | tee repflow-release/R4_CAPACITOR_CONFIG_SHA256.txt
+          sha256sum repflow/scripts/bootstrap-capacitor.sh | tee repflow-release/R4_BOOTSTRAP_SHA256.txt
+          sha256sum repflow/scripts/patch-android.py | tee repflow-release/R4_ANDROID_PATCHER_SHA256.txt
+
+          echo '2560ebcd787406f9e861d10976d64cc1aa6e8897ef9ff5a637384f24c84a67e7  repflow/web/index.html' | sha256sum -c -
+          echo 'cf76e3ad42bf327aa0a5f9000d3bce3767551a2dbfe6b7ad0212ad820b74055c  repflow/package.json' | sha256sum -c -
+          echo '6a4fb553d8ec1b2fb6b999b1e9d9587f89a74cb0ee8b01a450dca6c1344c28f4  repflow/capacitor.config.json' | sha256sum -c -
+          echo '14d8a076959bc629a9287494b854aa71a2ae874fa7cf7cd48c68bacb87bbea38  repflow/scripts/bootstrap-capacitor.sh' | sha256sum -c -
+          echo 'cc2c7b2d57389144b4c24f1e03dce0aa41643acd972a351c130913b5fb110e25  repflow/scripts/patch-android.py' | sha256sum -c -
+
+          grep -q '"version": "1.0.0-capacitor.3"' repflow/package.json
+          grep -q '"appId": "net.nexarenew.repflow"' repflow/capacitor.config.json
+          grep -q '"hostname": "localhost"' repflow/capacitor.config.json
+          grep -q '"androidScheme": "http"' repflow/capacitor.config.json
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          set -euxo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install exact Capacitor dependencies and audit
+        working-directory: repflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm install --no-audit --no-fund
+          npm audit --json > ../repflow-release/npm-audit.json || true
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('../repflow-release/npm-audit.json')
+          obj = json.loads(p.read_text())
+          vuln = (obj.get('metadata') or {}).get('vulnerabilities') or {}
+          print('npm_audit_vulnerabilities=', vuln)
+          if int(vuln.get('critical', 0) or 0) or int(vuln.get('high', 0) or 0):
+              raise SystemExit('high/critical npm audit vulnerability gate failed')
+          PY
+
+      - name: Verify exact Capacitor 8.5.0 toolchain
+        working-directory: repflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          node - <<'NODE'
+          const deps=['@capacitor/core','@capacitor/android','@capacitor/cli'];
+          for (const d of deps) {
+            const v=require(`./node_modules/${d}/package.json`).version;
+            console.log(`${d}=${v}`);
+            if (v !== '8.5.0') process.exit(1);
+          }
+          NODE
+          node --version | tee ../repflow-release/node-version.txt
+          npm --version | tee ../repflow-release/npm-version.txt
+          java -version 2>&1 | tee ../repflow-release/java-version.txt
+
+      - name: Generate and harden native Android project
+        working-directory: repflow
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/bootstrap-capacitor.sh
+
+          test -x android/gradlew
+          grep -q 'net.nexarenew.repflow' capacitor.config.json
+          grep -q 'android:networkSecurityConfig="@xml/network_security_config"' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:allowBackup="false"' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:fullBackupContent="false"' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.ACCESS_NETWORK_STATE' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.VIBRATE' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.WAKE_LOCK' android/app/src/main/AndroidManifest.xml
+          grep -q 'cleartextTrafficPermitted="false"' android/app/src/main/res/xml/network_security_config.xml
+          grep -q '>127.0.0.1<' android/app/src/main/res/xml/network_security_config.xml
+          grep -q '>localhost<' android/app/src/main/res/xml/network_security_config.xml
+          grep -Eq 'minSdkVersion\s*=\s*24' android/variables.gradle
+          grep -Eq 'compileSdkVersion\s*=\s*36' android/variables.gradle
+          grep -Eq 'targetSdkVersion\s*=\s*36' android/variables.gradle
+          grep -Eq 'versionCode\s+3' android/app/build.gradle
+          grep -q 'versionName "1.0.0-capacitor.3"' android/app/build.gradle
+          test -f android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          test -f android/app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
+          grep -q '<monochrome ' android/app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml
+
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('android/app/src/main/AndroidManifest.xml').read_text()
+          found = re.findall(r'<uses-permission\b[^>]*android:name="([^"]+)"', text)
+          expected = {
+              'android.permission.INTERNET',
+              'android.permission.ACCESS_NETWORK_STATE',
+              'android.permission.VIBRATE',
+              'android.permission.WAKE_LOCK',
+          }
+          if set(found) != expected or len(found) != len(expected):
+              raise SystemExit(f'generated manifest permission allowlist mismatch: {found!r}')
+          print('generated_manifest_permission_allowlist=PASS')
+          PY
+
+      - name: Build R4 debug APK
+        working-directory: repflow/android
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ./gradlew --no-daemon assembleDebug
+
+      - name: Verify R4 APK identity, permissions, embedded frontend, integrity and signature
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APK="repflow/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          cp "$APK" repflow-release/RepFlow-R4-debug.apk
+          sha256sum "$APK" | tee repflow-release/SHA256SUMS.txt
+
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt -perm -111 | sort -V | tail -n 1)"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner -perm -111 | sort -V | tail -n 1)"
+          test -x "$AAPT"
+          test -x "$APKSIGNER"
+
+          "$AAPT" dump badging "$APK" | tee repflow-release/aapt-badging.txt
+          "$AAPT" dump permissions "$APK" | tee repflow-release/aapt-permissions.txt
+
+          grep -q "package: name='net.nexarenew.repflow' versionCode='3' versionName='1.0.0-capacitor.3'" repflow-release/aapt-badging.txt
+          grep -q "sdkVersion:'24'" repflow-release/aapt-badging.txt
+          grep -q "targetSdkVersion:'36'" repflow-release/aapt-badging.txt
+          grep -q "application-label:'RepFlow'" repflow-release/aapt-badging.txt
+          grep -q "application-icon-.*:'res/.*ic_launcher" repflow-release/aapt-badging.txt
+
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('repflow-release/aapt-permissions.txt').read_text()
+          found = set(re.findall(r"uses-permission: name='([^']+)'", text))
+          expected = {
+              'android.permission.INTERNET',
+              'android.permission.ACCESS_NETWORK_STATE',
+              'android.permission.VIBRATE',
+              'android.permission.WAKE_LOCK',
+              'net.nexarenew.repflow.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
+          }
+          if found != expected:
+              raise SystemExit(f'APK permission allowlist mismatch: {sorted(found)!r}')
+          print('apk_permission_allowlist=PASS')
+          PY
+
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee repflow-release/apksigner-verification.txt
+          grep -q '^Verifies$' repflow-release/apksigner-verification.txt
+          grep -q 'Verified using v2 scheme (APK Signature Scheme v2): true' repflow-release/apksigner-verification.txt
+          unzip -t "$APK" | tee repflow-release/apk-zip-test.txt
+
+          unzip -p "$APK" assets/public/index.html > /tmp/apk-index.html
+          echo '2560ebcd787406f9e861d10976d64cc1aa6e8897ef9ff5a637384f24c84a67e7  /tmp/apk-index.html' | sha256sum -c -
+          sha256sum /tmp/apk-index.html | tee repflow-release/APK_EMBEDDED_INDEX_SHA256.txt
+
+          unzip -p "$APK" assets/capacitor.config.json > /tmp/apk-capacitor-config.json
+          grep -q '"appId": "net.nexarenew.repflow"' /tmp/apk-capacitor-config.json
+          grep -q '"hostname": "localhost"' /tmp/apk-capacitor-config.json
+          grep -q '"androidScheme": "http"' /tmp/apk-capacitor-config.json
+
+          cp repflow/android/app/build/outputs/apk/debug/output-metadata.json repflow-release/output-metadata.json
+          cp repflow/android/app/src/main/AndroidManifest.xml repflow-release/AndroidManifest.xml
+          cp repflow/android/app/src/main/res/xml/network_security_config.xml repflow-release/network_security_config.xml
+          cp repflow/android/app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml repflow-release/ic_launcher_v33.xml
+          cp repflow/package.json repflow-release/package.json
+          cp repflow/capacitor.config.json repflow-release/capacitor.config.json
+          printf '%s\n' '8f5e3fd1a8f42df5cc26d97b75c0fd6e7317f152cc3704c73d2dd7571d610dad  REPFLOW_SCHEMA5_AI_V1_CAPACITOR_ANDROID_NATIVE_R4_SOURCE_30082026213817.zip' > repflow-release/AUTHORITATIVE_R4_SOURCE_SHA256.txt
+          printf '%s\n' 'RepFlow R4 APK build and static verification PASS' > repflow-release/BUILD_VERIFICATION_STATUS.txt
+
+      - name: Upload verified RepFlow R4 APK artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repflow-r4-debug-apk
+          path: repflow-release/
+          if-no-files-found: error
+          retention-days: 30
