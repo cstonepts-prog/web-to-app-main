@@ -156,7 +156,7 @@ jobs:
           bash scripts/bootstrap-capacitor.sh
           test -x android/gradlew
           grep -q 'net.nexarenew.repflow' capacitor.config.json
-          grep -q 'networkSecurityConfig="@xml/network_security_config"' android/app/src/main/AndroidManifest.xml
+          grep -q 'android:networkSecurityConfig="@xml/network_security_config"' android/app/src/main/AndroidManifest.xml
           grep -q 'cleartextTrafficPermitted="false"' android/app/src/main/res/xml/network_security_config.xml
           grep -q '>127.0.0.1<' android/app/src/main/res/xml/network_security_config.xml
           grep -q '>localhost<' android/app/src/main/res/xml/network_security_config.xml
