@@ -43,7 +43,40 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          cat repflow-ci/bundle.part* | tr -d '\n\r ' | base64 -d > /tmp/repflow_android_slim.zip
+          exec > >(tee -a /tmp/rehydrate-diagnostics.txt) 2>&1
+          EXPECTED=(
+            c4ea1db06db68c8252b2c007f0b70ad230cfe19b
+            fbe6961c75e0d42387107a5d1d2c5741f25fff10
+            b3a3098b1c1abc59e61213bf95f7f55ea18c2f1c
+            c158f6bae8dd7d9f2a390bbe3faa94dbad089366
+            f6483dd486f733f2722941568551b630c90c5b60
+            d67d5b4e027bc53a28015118212ca4ffaa68e926
+            896c6c90f5763b8db805c2224938d6a9ae44ce5b
+            61fa67da8f2e08968bc77d79fdadea1d731ae206
+          )
+          i=0
+          for n in 01 02 03 04 05 06 07 08; do
+            f="repflow-ci/bundle.part${n}"
+            test -f "$f"
+            actual="$(git hash-object "$f")"
+            bytes="$(wc -c < "$f")"
+            echo "$f bytes=$bytes git_blob=$actual expected=${EXPECTED[$i]}"
+            test "$actual" = "${EXPECTED[$i]}"
+            i=$((i+1))
+          done
+          cat repflow-ci/bundle.part{01..08} > /tmp/repflow.b64
+          python - <<'PY'
+          import base64
+          from pathlib import Path
+          src = Path('/tmp/repflow.b64').read_bytes()
+          clean = b''.join(src.split())
+          print(f'base64_raw_bytes={len(src)} base64_clean_bytes={len(clean)} mod4={len(clean)%4}')
+          out = base64.b64decode(clean, validate=True)
+          print(f'zip_bytes={len(out)} magic={out[:4]!r}')
+          if not out.startswith(b'PK'):
+              raise SystemExit('decoded payload is not a ZIP')
+          Path('/tmp/repflow_android_slim.zip').write_bytes(out)
+          PY
           unzip -t /tmp/repflow_android_slim.zip
           mkdir -p repflow
           unzip -q /tmp/repflow_android_slim.zip -d repflow
@@ -53,6 +86,15 @@ jobs:
           test -f repflow/scripts/bootstrap-capacitor.sh
           test -f repflow/scripts/patch-android.py
           test -f repflow/web/index.html
+
+      - name: Upload rehydrate diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repflow-rehydrate-diagnostics
+          path: /tmp/rehydrate-diagnostics.txt
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Install exact Capacitor dependencies
         working-directory: repflow
